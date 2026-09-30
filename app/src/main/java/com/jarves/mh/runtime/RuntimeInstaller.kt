@@ -539,7 +539,7 @@ class RuntimeInstaller(private val context: Context) {
             from = fraction,
             to = 0.995f,
             onProgress = onProgress,
-            forceEmbedded = true,
+            forceEmbedded = false,
         )
         verifyGuest(proot, "$AGY_GUEST_PATH --version", "Antigravity CLI verification failed")
         agyMarker.writeText(AGY_VERSION)
