@@ -230,6 +230,7 @@ private enum class RootScreen(val label: String, val icon: ImageVector) {
     PROJECTS("Projects", Icons.Default.Folder),
     AGENT("Agent", Icons.Default.SmartToy),
     CURSOR("Cursor AI", Icons.Default.PlayArrow),
+    MCP("MCP Remote", Icons.Default.Dns),
     SETTINGS("Settings", Icons.Default.Settings),
 }
 private enum class WorkspaceTab(val label: String, val icon: ImageVector) {
@@ -2115,6 +2116,7 @@ private fun RootScreenHost(
                     onSetAntigravityEffort = viewModel::setAntigravityEffort,
                 )
                 RootScreen.CURSOR -> CursorTab(onOpenCapture = {})
+                RootScreen.MCP -> McpSetupScreen()
                 RootScreen.SETTINGS -> SettingsScreen(
                     state = state,
                     onSaveProvider = { profile, key ->
