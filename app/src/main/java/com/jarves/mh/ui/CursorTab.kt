@@ -29,6 +29,7 @@ import com.jarves.mh.capture.ScreenSpoofAccessibilityService
 import com.jarves.mh.cursor.CursorEngine
 import com.jarves.mh.cursor.CursorOverlayManager
 import com.jarves.mh.cursor.CursorServer
+import com.jarves.mh.commander.DesktopCommanderManager
 
 @Composable
 fun CursorTab(onOpenCapture: (CaptureRecord) -> Unit) {
@@ -36,6 +37,9 @@ fun CursorTab(onOpenCapture: (CaptureRecord) -> Unit) {
     val clipboardManager = LocalClipboardManager.current
     val isOverlayActive by CursorOverlayManager.isOverlayActive.collectAsState()
     val isAccConnected = ScreenSpoofAccessibilityService.isConnected()
+    val isCommanderRunning by DesktopCommanderManager.isRunning.collectAsState()
+    val commanderPairingCode by DesktopCommanderManager.pairingCode.collectAsState()
+    val commanderOutput by DesktopCommanderManager.terminalOutput.collectAsState()
 
     var lastAction by remember { mutableStateOf("Ready for AI actions") }
     var lastLatency by remember { mutableStateOf<Long?>(null) }
@@ -212,6 +216,77 @@ fun CursorTab(onOpenCapture: (CaptureRecord) -> Unit) {
                             checkedTrackColor = Color(0xFF047857)
                         )
                     )
+                }
+
+                HorizontalDivider(color = Color(0xFF1E293B))
+
+                // Desktop Commander Remote Switch
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "Desktop Commander Remote",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            if (commanderPairingCode != null) {
+                                Surface(
+                                    color = Color(0xFF0284C7),
+                                    shape = RoundedCornerShape(4.dp)
+                                ) {
+                                    Text(
+                                        text = "CODE: $commanderPairingCode",
+                                        color = Color.White,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = FontFamily.Monospace,
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            text = "npx @wonderwhy-er/desktop-commander@latest remote",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    Switch(
+                        checked = isCommanderRunning,
+                        onCheckedChange = { enable ->
+                            if (enable) DesktopCommanderManager.start(context) else DesktopCommanderManager.stop()
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color(0xFF38BDF8),
+                            checkedTrackColor = Color(0xFF0369A1)
+                        )
+                    )
+                }
+
+                // If running or has output, show terminal preview
+                if (commanderOutput.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF020617), RoundedCornerShape(6.dp))
+                            .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(6.dp))
+                            .padding(8.dp)
+                    ) {
+                        Text(
+                            text = commanderOutput.takeLast(400),
+                            color = Color(0xFF38BDF8),
+                            fontSize = 9.5.sp,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 4
+                        )
+                    }
                 }
             }
         }
