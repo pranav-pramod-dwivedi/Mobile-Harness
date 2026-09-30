@@ -229,6 +229,7 @@ import androidx.compose.material3.ExtendedFloatingActionButton
 private enum class RootScreen(val label: String, val icon: ImageVector) {
     PROJECTS("Projects", Icons.Default.Folder),
     AGENT("Agent", Icons.Default.SmartToy),
+    CURSOR("Cursor AI", Icons.Default.PlayArrow),
     SETTINGS("Settings", Icons.Default.Settings),
 }
 private enum class WorkspaceTab(val label: String, val icon: ImageVector) {
@@ -2113,6 +2114,7 @@ private fun RootScreenHost(
                     onSetAntigravityModel = viewModel::setAntigravityModel,
                     onSetAntigravityEffort = viewModel::setAntigravityEffort,
                 )
+                RootScreen.CURSOR -> CursorTab(onOpenCapture = {})
                 RootScreen.SETTINGS -> SettingsScreen(
                     state = state,
                     onSaveProvider = { profile, key ->

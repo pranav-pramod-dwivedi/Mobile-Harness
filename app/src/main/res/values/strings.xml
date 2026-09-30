@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Mobile Harness</string>
+    <string name="accessibility_description">Mobile Harness ScreenSpoof and Cursor AI Control service for automated accessibility interactions and schematic generation.</string>
 </resources>
+

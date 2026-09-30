@@ -15,6 +15,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        try {
+            com.jarves.mh.cursor.CursorServer.start(this)
+            com.jarves.mh.cursor.CursorOverlayManager.show(this)
+        } catch (_: Exception) {}
+
         setContent {
             val vm: MainViewModel = viewModel()
             val state by vm.state.collectAsStateWithLifecycle()
