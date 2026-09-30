@@ -64,9 +64,47 @@ class CursorOverlayView(context: Context) : View(context) {
     // Long press charge arc
     private var chargeAngle = 0f
 
-    // ------------------------------------------------------------------------
-    // Paints & Styling (Crisp, High Visibility, Clean)
-    // ------------------------------------------------------------------------
+    // Inactivity Fade-out / Disappear
+    var cursorAlpha = 1.0f
+        private set
+    private var inactivityFadeAnimator: ValueAnimator? = null
+    private val inactivityTimeoutMs = 1500L // Disappear smoothly after 1.5s of inactivity
+    private val inactivityRunnable = Runnable {
+        fadeOutOnInactivity()
+    }
+
+    private fun resetInactivityTimer() {
+        removeCallbacks(inactivityRunnable)
+        if (cursorAlpha < 1.0f) {
+            fadeInOnActivity()
+        }
+        postDelayed(inactivityRunnable, inactivityTimeoutMs)
+    }
+
+    private fun fadeInOnActivity() {
+        inactivityFadeAnimator?.cancel()
+        inactivityFadeAnimator = ValueAnimator.ofFloat(cursorAlpha, 1.0f).apply {
+            duration = 150
+            addUpdateListener { va ->
+                cursorAlpha = va.animatedValue as Float
+                postInvalidateOnAnimation()
+            }
+        }
+        inactivityFadeAnimator?.start()
+    }
+
+    private fun fadeOutOnInactivity() {
+        inactivityFadeAnimator?.cancel()
+        inactivityFadeAnimator = ValueAnimator.ofFloat(cursorAlpha, 0.0f).apply {
+            duration = 350
+            interpolator = easeInOutInterpolator
+            addUpdateListener { va ->
+                cursorAlpha = va.animatedValue as Float
+                postInvalidateOnAnimation()
+            }
+        }
+        inactivityFadeAnimator?.start()
+    }
 
     // Compact Cursor Pointer Body (Obsidian Dark with high-contrast depth)
     private val arrowFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -124,6 +162,7 @@ class CursorOverlayView(context: Context) : View(context) {
 
     init {
         setLayerType(LAYER_TYPE_HARDWARE, null)
+        resetInactivityTimer()
     }
 
     // ------------------------------------------------------------------------
@@ -135,6 +174,7 @@ class CursorOverlayView(context: Context) : View(context) {
     }
 
     fun glideTo(targetX: Float, targetY: Float, actionLabel: String, onArrived: (() -> Unit)? = null) {
+        resetInactivityTimer()
         val startX = cursorX
         val startY = cursorY
         val dx = targetX - startX
@@ -335,6 +375,7 @@ class CursorOverlayView(context: Context) : View(context) {
     }
 
     fun triggerType(text: String) {
+        resetInactivityTimer()
         currentMode = CursorMode.TYPING
         postDelayed({
             currentMode = CursorMode.DEFAULT
@@ -348,6 +389,11 @@ class CursorOverlayView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+
+        // If completely faded out and no active trail or ripple, skip rendering to save CPU/GPU cycles
+        if (cursorAlpha <= 0f && flightTrail.isEmpty() && tapRippleAlpha <= 0.01f) {
+            return
+        }
 
         // 1. Dynamic Motion Trail (Visible tapered ribbon following the flight)
         if (flightTrail.size >= 2) {
@@ -366,7 +412,7 @@ class CursorOverlayView(context: Context) : View(context) {
                 // Age decay: points older than 250ms fade away
                 val age = (now - n2.timestamp).coerceAtLeast(0L)
                 val ageAlpha = (1.0f - (age / 250f)).coerceIn(0f, 1f)
-                val alpha = (progress * ageAlpha * 210).toInt().coerceIn(0, 255)
+                val alpha = (progress * ageAlpha * 210 * cursorAlpha).toInt().coerceIn(0, 255)
 
                 if (alpha > 4) {
                     motionTrailPaint.strokeWidth = strokeW
@@ -378,7 +424,7 @@ class CursorOverlayView(context: Context) : View(context) {
 
         // 2. Clean Tap Ripple Pulse (Discreet Feedback)
         if (tapRippleAlpha > 0.01f) {
-            tapRipplePaint.alpha = (tapRippleAlpha * 255).toInt()
+            tapRipplePaint.alpha = (tapRippleAlpha * 255 * cursorAlpha).toInt()
             canvas.drawCircle(cursorX, cursorY, tapRippleRadius, tapRipplePaint)
         }
 
@@ -386,18 +432,25 @@ class CursorOverlayView(context: Context) : View(context) {
         if (currentMode == CursorMode.LONG_PRESS && chargeAngle > 0f) {
             val arcR = 16f * dp
             val oval = RectF(cursorX - arcR, cursorY - arcR, cursorX + arcR, cursorY + arcR)
+            chargeArcPaint.alpha = (255 * cursorAlpha).toInt()
             canvas.drawArc(oval, -90f, chargeAngle, false, chargeArcPaint)
         }
 
-        // 4. Draw Small Studio Cursor Pointer
-        canvas.save()
-        canvas.translate(cursorX, cursorY)
-        canvas.scale(cursorScale, cursorScale)
-        canvas.rotate(cursorRotation)
+        // 4. Draw Small Studio Cursor Pointer (faded out smoothly with cursorAlpha)
+        if (cursorAlpha > 0f) {
+            canvas.save()
+            canvas.translate(cursorX, cursorY)
+            canvas.scale(cursorScale, cursorScale)
+            canvas.rotate(cursorRotation)
 
-        drawStudioCursor(canvas)
+            // Modulate paints with cursorAlpha
+            arrowFillPaint.alpha = (255 * cursorAlpha).toInt()
+            arrowStrokePaint.alpha = (255 * cursorAlpha).toInt()
 
-        canvas.restore()
+            drawStudioCursor(canvas)
+
+            canvas.restore()
+        }
     }
 
     private fun drawStudioCursor(canvas: Canvas) {
