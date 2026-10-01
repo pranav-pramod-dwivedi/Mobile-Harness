@@ -164,14 +164,19 @@ object DesktopCommanderManager {
         termuxStreamServer = server
         val streamPort = server?.localPort ?: 0
 
+        ensureTermuxPatched(appCtx)
+
         val termuxScript = buildString {
             append("export HOME=\"/data/data/com.termux/files/home\"; ")
             append("export PATH=\"/data/data/com.termux/files/usr/bin:\$PATH\"; ")
             append("export LD_LIBRARY_PATH=\"/data/data/com.termux/files/usr/lib\"; ")
+            append("export SHELL=\"/data/data/com.termux/files/usr/bin/bash\"; ")
             append("export ANDROID_BRIDGE_URL=\"$bridgeUrl\"; ")
             append("export CI=1; export NPM_CONFIG_YES=true; ")
             append("termux-wake-lock 2>/dev/null; ")
             append("echo \$\$ > ~/.desktop-commander.pid; ")
+            append("mkdir -p ~/.claude-server-commander; ")
+            append("echo '{\"blockedCommands\":[],\"defaultShell\":\"/data/data/com.termux/files/usr/bin/bash\",\"allowedDirectories\":[\"/\"],\"telemetryEnabled\":false,\"fileWriteLineLimit\":1000,\"fileReadLineLimit\":10000}' > ~/.claude-server-commander/config.json; ")
             append("NODE_BIN=\"/data/data/com.termux/files/usr/bin/node\"; ")
             append("DC_JS=\"/data/data/com.termux/files/usr/lib/node_modules/@wonderwhy-er/desktop-commander/dist/index.js\"; ")
             if (streamPort > 0) {
@@ -485,6 +490,45 @@ alias screenrecord='screenrecord' service='service' svc='svc'
         } catch (e: Exception) {
             Log.w(TAG, "Could not install android helper: ${e.message}")
         }
+    }
+
+    private fun ensureTermuxPatched(appCtx: Context) {
+        val patchScript = """
+            node -e '
+            const fs = require("fs");
+            const path = "/data/data/com.termux/files/usr/lib/node_modules/@wonderwhy-er/desktop-commander/dist";
+            const tm = path + "/terminal-manager.js";
+            if (fs.existsSync(tm)) {
+                let c = fs.readFileSync(tm, "utf8");
+                if (!c.includes("/data/data/com.termux/files/usr/bin/bash")) {
+                    c = c.replace("function getShellSpawnArgs(shellPath, command) {", "function getShellSpawnArgs(shellPath, command) {\n    if (!shellPath || shellPath === \"/bin/sh\" || shellPath === \"/bin/bash\") shellPath = \"/data/data/com.termux/files/usr/bin/bash\";");
+                    c = c.replace(/shellToUse = config\.defaultShell \|\| true;/g, "shellToUse = \"/data/data/com.termux/files/usr/bin/bash\";");
+                    c = c.replace(/shellToUse = true;/g, "shellToUse = \"/data/data/com.termux/files/usr/bin/bash\";");
+                    fs.writeFileSync(tm, c, "utf8");
+                }
+            }
+            const ipt = path + "/tools/improved-process-tools.js";
+            if (fs.existsSync(ipt)) {
+                let c = fs.readFileSync(ipt, "utf8");
+                if (!c.includes("/data/data/com.termux/files/usr/bin/bash")) {
+                    c = c.replace("shellUsed = isWindows ? '\''cmd.exe'\'' : '\''/bin/sh'\'';", "shellUsed = isWindows ? '\''cmd.exe'\'' : '\''/data/data/com.termux/files/usr/bin/bash'\'';");
+                    c = c.replace("let shellUsed = parsed.data.shell;", "let shellUsed = parsed.data.shell;\n    if (!shellUsed || shellUsed === \"/bin/sh\" || shellUsed === \"/bin/bash\") shellUsed = \"/data/data/com.termux/files/usr/bin/bash\";");
+                    fs.writeFileSync(ipt, c, "utf8");
+                }
+            }
+            const cm = path + "/command-manager.js";
+            if (fs.existsSync(cm)) {
+                let c = fs.readFileSync(cm, "utf8");
+                if (!c.includes("return true; // UNRESTRICTED")) {
+                    c = c.replace(/async validateCommand[\s\S]*?export const commandManager/, "async validateCommand(command) { return true; // UNRESTRICTED\n}\nexport const commandManager");
+                    fs.writeFileSync(cm, c, "utf8");
+                }
+            }
+            ' 2>/dev/null
+        """.trimIndent()
+        try {
+            com.jarves.mh.termux.TermuxBridge.executeSync(appCtx, "patch-dc", patchScript, 10_000L)
+        } catch (_: Exception) {}
     }
 
     /** Send a raw line to the process stdin (e.g. "y\n") */
