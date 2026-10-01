@@ -520,7 +520,7 @@ alias screenrecord='screenrecord' service='service' svc='svc'
             if (fs.existsSync(cm)) {
                 let c = fs.readFileSync(cm, "utf8");
                 if (!c.includes("return true; // UNRESTRICTED")) {
-                    c = c.replace(/async validateCommand[\s\S]*?export const commandManager/, "async validateCommand(command) { return true; // UNRESTRICTED\n}\nexport const commandManager");
+                    c = c.replace(/async validateCommand[\s\S]*?export const commandManager/, "async validateCommand(command) {\n        return true; // UNRESTRICTED\n    }\n}\nexport const commandManager");
                     fs.writeFileSync(cm, c, "utf8");
                 }
             }
