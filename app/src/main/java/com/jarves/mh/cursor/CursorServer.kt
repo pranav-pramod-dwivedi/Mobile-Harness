@@ -39,6 +39,9 @@ object CursorServer {
     var isRunning = false
         private set
 
+    private val _isRunningState = kotlinx.coroutines.flow.MutableStateFlow(false)
+    val isRunningState: kotlinx.coroutines.flow.StateFlow<Boolean> = _isRunningState
+
     fun start(context: Context) {
         if (isRunning) return
         val appCtx = context.applicationContext ?: context
@@ -51,9 +54,12 @@ object CursorServer {
             try {
                 val ss = ServerSocket()
                 ss.reuseAddress = true
-                ss.bind(InetSocketAddress(PORT))
+                // Loopback only: the guest shares the network namespace, and
+                // adb forward still works. Never expose phone-exec to the LAN.
+                ss.bind(InetSocketAddress("127.0.0.1", PORT))
                 serverSocket = ss
                 isRunning = true
+                _isRunningState.value = true
                 Log.i(TAG, "CursorServer successfully listening on port $PORT")
 
                 while (isRunning && !ss.isClosed) {
@@ -69,12 +75,14 @@ object CursorServer {
             } catch (e: Exception) {
                 Log.e(TAG, "CursorServer startup failed: ${e.message}")
                 isRunning = false
+                _isRunningState.value = false
             }
         }
     }
 
     fun stop() {
         isRunning = false
+        _isRunningState.value = false
         scope.launch {
             try {
                 serverSocket?.close()
@@ -149,9 +157,13 @@ object CursorServer {
 
             when {
                 uri.startsWith("/cursor/act") -> handleAct(out, method, body)
+                uri.startsWith("/cursor/type") -> handleAct(out, "POST", aliasBody(body, "type"))
+                uri.startsWith("/cursor/swipe") -> handleAct(out, "POST", aliasBody(body, "swipe"))
+                uri.startsWith("/cursor/multitouch") -> handleAct(out, "POST", aliasBody(body, "multitouch"))
                 uri.startsWith("/cursor/spoof") -> handleSpoof(out)
                 uri.startsWith("/cursor/status") -> handleStatus(out)
                 uri.startsWith("/cursor/batch") -> handleBatch(out, body)
+                uri.startsWith("/phone/exec") -> handlePhoneExec(out, method, body)
                 else -> handleDashboard(out)
             }
         } catch (_: Exception) {
@@ -163,6 +175,16 @@ object CursorServer {
     // ------------------------------------------------------------------------
     // Endpoint Handlers
     // ------------------------------------------------------------------------
+
+    private fun aliasBody(body: String, action: String): String {
+        return try {
+            val json = if (body.isBlank()) JSONObject() else JSONObject(body)
+            if (!json.has("action")) json.put("action", action)
+            json.toString()
+        } catch (_: Exception) {
+            JSONObject().put("action", action).toString()
+        }
+    }
 
     private fun handleAct(out: OutputStream, method: String, body: String) {
         if (method != "POST") {
@@ -542,8 +564,54 @@ object CursorServer {
         sendRawResponse(out, 200, "OK", "text/html; charset=UTF-8", html)
     }
 
-    private fun sendJson(out: OutputStream, code: Int, json: JSONObject) {
-        val text = json.toString()
+    // ------------------------------------------------------------------------
+    // Android phone bridge: lets the Linux guest run host toolbox commands
+    // (am, pm, cmd, dumpsys, input, ...) as the app UID via ShellRunner.
+    // Loopback-only server, argv array (no shell), allowlisted binaries.
+    // ------------------------------------------------------------------------
+
+    private val phoneTools = setOf(
+        "am", "pm", "cmd", "dumpsys", "input", "settings", "getprop",
+        "svc", "wm", "screencap", "uiautomator", "content", "dpm", "ime", "sm"
+    )
+
+    private fun handlePhoneExec(out: OutputStream, method: String, body: String) {
+        if (method != "POST") {
+            sendJson(out, 405, JSONObject().put("error", "Use POST"))
+            return
+        }
+        val argv = try {
+            val json = JSONObject(body)
+            val arr = json.getJSONArray("argv")
+            (0 until arr.length()).map { arr.getString(it) }
+        } catch (_: Exception) {
+            sendJson(out, 400, JSONObject().put("error", "Body must be {\"argv\": [\"am\", ...]}"))
+            return
+        }
+        if (argv.isEmpty() || argv[0] !in phoneTools) {
+            sendJson(out, 400, JSONObject().put("error", "Tool must be one of: ${phoneTools.sorted().joinToString(", ")}"))
+            return
+        }
+        val bin = listOf("/system/bin/${argv[0]}", "/product/bin/${argv[0]}")
+            .firstOrNull { java.io.File(it).exists() }
+            ?: run {
+                sendJson(out, 500, JSONObject().put("error", "${argv[0]} not found on this device"))
+                return
+            }
+        val quoted = (listOf(bin) + argv.drop(1)).joinToString(" ") { "'${it.replace("'", "'\\''")}'" }
+        val res = try {
+            com.jarves.mh.capture.ShellRunner.exec(quoted, asRoot = false, timeoutMs = 25_000L)
+        } catch (e: Exception) {
+            sendJson(out, 500, JSONObject().put("error", e.message ?: "exec failed"))
+            return
+        }
+        sendJson(out, 200, JSONObject()
+            .put("rc", res.rc)
+            .put("out", res.out)
+            .put("err", res.err))
+    }
+
+    private fun sendJson(out: OutputStream, code: Int, json: JSONObject) {        val text = json.toString()
         val statusText = if (code == 200) "OK" else if (code == 400) "Bad Request" else if (code == 405) "Method Not Allowed" else "Internal Server Error"
         sendRawResponse(out, code, statusText, "application/json; charset=UTF-8", text)
     }

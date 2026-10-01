@@ -35,6 +35,7 @@ fun CursorTab(onOpenCapture: (CaptureRecord) -> Unit) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
     val isOverlayActive by CursorOverlayManager.isOverlayActive.collectAsState()
+    val isServerRunning by CursorServer.isRunningState.collectAsState()
     val isAccConnected = ScreenSpoofAccessibilityService.isConnected()
 
     var lastAction by remember { mutableStateOf("Ready for AI actions") }
@@ -53,6 +54,7 @@ fun CursorTab(onOpenCapture: (CaptureRecord) -> Unit) {
     fun runAction(name: String, block: (onDone: (Boolean) -> Unit) -> Unit) {
         if (!isAccConnected) {
             Toast.makeText(context, "Enable ScreenSpoof in Accessibility Settings first", Toast.LENGTH_SHORT).show()
+            return
         }
         isExecuting = true
         lastAction = "Executing $name..."
@@ -110,11 +112,11 @@ fun CursorTab(onOpenCapture: (CaptureRecord) -> Unit) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (CursorServer.isRunning) Color(0xFF065F46) else Color(0xFF991B1B))
+                            .background(if (isServerRunning) Color(0xFF065F46) else Color(0xFF991B1B))
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            text = if (CursorServer.isRunning) "PORT :${CursorServer.PORT}" else "OFFLINE",
+                            text = if (isServerRunning) "PORT :${CursorServer.PORT}" else "OFFLINE",
                             color = Color.White,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
@@ -203,7 +205,7 @@ fun CursorTab(onOpenCapture: (CaptureRecord) -> Unit) {
                         )
                     }
                     Switch(
-                        checked = CursorServer.isRunning,
+                        checked = isServerRunning,
                         onCheckedChange = { enable ->
                             if (enable) CursorServer.start(context) else CursorServer.stop()
                         },
@@ -501,6 +503,91 @@ curl -X POST http://127.0.0.1:8899/cursor/act \
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("📋 Copy cURL Command", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = Color.White)
+                }
+            }
+        }
+
+        // --------------------------------------------------------------------
+        // Command Sandbox (tap / swipe / type / back|home|recents)
+        // --------------------------------------------------------------------
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF090D18)),
+            shape = RoundedCornerShape(12.dp),
+            border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(Color(0xFF1E293B)))
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "COMMAND SANDBOX",
+                    color = Color(0xFF38BDF8),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = "tap X Y | swipe X1 Y1 X2 Y2 [dur] | type <text> | back|home|recents",
+                    color = Color(0xFF64748B),
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = commandLine,
+                        onValueChange = { commandLine = it },
+                        label = { Text("command", fontSize = 10.sp) },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color.White)
+                    )
+                    Button(
+                        onClick = {
+                            val parts = commandLine.trim().split("\\s+".toRegex())
+                            if (parts.isEmpty() || parts[0].isEmpty()) return@Button
+                            when (parts[0].lowercase()) {
+                                "tap" -> {
+                                    val x = parts.getOrNull(1)?.toFloatOrNull() ?: return@Button
+                                    val y = parts.getOrNull(2)?.toFloatOrNull() ?: return@Button
+                                    CursorOverlayManager.onTap(x, y)
+                                    runAction("Tap ($x, $y)") { CursorEngine.tap(x, y, 50, it) }
+                                }
+                                "swipe" -> {
+                                    val x1 = parts.getOrNull(1)?.toFloatOrNull() ?: return@Button
+                                    val y1 = parts.getOrNull(2)?.toFloatOrNull() ?: return@Button
+                                    val x2 = parts.getOrNull(3)?.toFloatOrNull() ?: return@Button
+                                    val y2 = parts.getOrNull(4)?.toFloatOrNull() ?: return@Button
+                                    val dur = parts.getOrNull(5)?.toLongOrNull() ?: 250L
+                                    CursorOverlayManager.onSwipe(x1, y1, x2, y2)
+                                    runAction("Swipe") { CursorEngine.swipe(x1, y1, x2, y2, dur, it) }
+                                }
+                                "type" -> {
+                                    val text = commandLine.substringAfter("type").trim().removeSurrounding("\"")
+                                    if (text.isEmpty()) return@Button
+                                    CursorOverlayManager.onType(text)
+                                    runAction("Type \"$text\"") { CursorEngine.typeText(text, it) }
+                                }
+                                "back" -> {
+                                    CursorOverlayManager.onNavAction("◀ BACK")
+                                    runAction("Back") { CursorEngine.pressKey(AccessibilityService.GLOBAL_ACTION_BACK, it) }
+                                }
+                                "home" -> {
+                                    CursorOverlayManager.onNavAction("■ HOME")
+                                    runAction("Home") { CursorEngine.pressKey(AccessibilityService.GLOBAL_ACTION_HOME, it) }
+                                }
+                                "recents" -> {
+                                    CursorOverlayManager.onNavAction("▦ RECENTS")
+                                    runAction("Recents") { CursorEngine.pressKey(AccessibilityService.GLOBAL_ACTION_RECENTS, it) }
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("GO", fontFamily = FontFamily.Monospace, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
                 }
             }
         }

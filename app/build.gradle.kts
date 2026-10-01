@@ -33,11 +33,24 @@ val runtimeBundleDir = rootProject.layout.projectDirectory.dir("dist/runtime-bun
 val generatedRuntimeAssets = layout.buildDirectory.dir("generated/runtime-assets")
 
 val prepareBundledAgentAssets = tasks.register<Sync>("prepareBundledAgentAssets") {
+    // Local dev may not have the large runtime bundles checked out; the online
+    // flavor downloads them at runtime, so skip gracefully instead of failing.
+    onlyIf { runtimeBundleDir.file("pocketdev-agy-arm64-2026.09.1.tar.zst").asFile.exists() }
     from(runtimeBundleDir.file("pocketdev-agy-arm64-2026.09.1.tar.zst"))
     into(generatedRuntimeAssets.map { it.dir("shared/runtime") })
 }
 
 val prepareOfflineRuntimeAssets = tasks.register<Sync>("prepareOfflineRuntimeAssets") {
+    // Same leniency for offline bundles — offline APKs simply ship without them.
+    onlyIf {
+        listOf(
+            "pocketdev-core-arm64-2026.09.5.tar.zst",
+            "pocketdev-claude-arm64-2026.09.1.tar.zst",
+            "pocketdev-python-arm64-2026.09.2.tar.zst",
+            "pocketdev-android-arm64-2026.09.1.tar.zst",
+            "pocketdev-dsh-arm64-2026.09.1.tar.zst",
+        ).any { runtimeBundleDir.file(it).asFile.exists() }
+    }
     from(
         runtimeBundleDir.file("pocketdev-core-arm64-2026.09.5.tar.zst"),
         runtimeBundleDir.file("pocketdev-claude-arm64-2026.09.1.tar.zst"),

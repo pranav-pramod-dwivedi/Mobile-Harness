@@ -87,6 +87,59 @@ class CursorActionReceiver : BroadcastReceiver() {
                 val enable = intent.getBooleanExtra("enable", true)
                 if (enable) CursorOverlayManager.show(context) else CursorOverlayManager.hide()
             }
+            "two_finger", "two-finger", "twofinger" -> {
+                val x1 = intent.getFloatExtra("x1", 440f)
+                val y1 = intent.getFloatExtra("y1", 1200f)
+                val x2 = intent.getFloatExtra("x2", 640f)
+                val y2 = intent.getFloatExtra("y2", 1200f)
+                val dx = intent.getFloatExtra("dx", 0f)
+                val dy = intent.getFloatExtra("dy", -600f)
+                val dur = intent.getLongExtra("duration", 300)
+                val run: ((Boolean) -> Unit) -> Unit = { cb ->
+                    CursorEngine.twoFingerSwipe(x1, y1, x1 + dx, y1 + dy, x2, y2, x2 + dx, y2 + dy, dur, cb)
+                }
+                if (respoof) CursorEngine.executeAndRespoof(context, "two_finger", run, {})
+                else run {}
+            }
+            "pinch" -> {
+                val cx = intent.getFloatExtra("x", 540f)
+                val cy = intent.getFloatExtra("y", 1200f)
+                val factor = intent.getFloatExtra("factor", 0.5f)
+                val dur = intent.getLongExtra("duration", 300)
+                if (respoof) CursorEngine.executeAndRespoof(context, "pinch", { CursorEngine.pinch(cx, cy, factor = factor, durationMs = dur, onDone = it) }, {})
+                else CursorEngine.pinch(cx, cy, factor = factor, durationMs = dur)
+            }
+            "zoom" -> {
+                val cx = intent.getFloatExtra("x", 540f)
+                val cy = intent.getFloatExtra("y", 1200f)
+                val factor = intent.getFloatExtra("factor", 2.0f)
+                val dur = intent.getLongExtra("duration", 300)
+                if (respoof) CursorEngine.executeAndRespoof(context, "zoom", { CursorEngine.zoom(cx, cy, factor = factor, durationMs = dur, onDone = it) }, {})
+                else CursorEngine.zoom(cx, cy, factor = factor, durationMs = dur)
+            }
+            "three_finger", "three-finger", "threefinger" -> {
+                val dir = (intent.getStringExtra("direction") ?: "up").lowercase()
+                val dur = intent.getLongExtra("duration", 300)
+                val cx = intent.getFloatExtra("x", 540f)
+                val cy = intent.getFloatExtra("y", 1200f)
+                val dist = intent.getFloatExtra("distance", 600f)
+                val (dx, dy) = when (dir) {
+                    "down" -> Pair(0f, dist)
+                    "left" -> Pair(-dist, 0f)
+                    "right" -> Pair(dist, 0f)
+                    else -> Pair(0f, -dist)
+                }
+                val run: ((Boolean) -> Unit) -> Unit = { cb ->
+                    CursorEngine.threeFingerSwipe(
+                        cx - 100f, cy, cx - 100f + dx, cy + dy,
+                        cx, cy, cx + dx, cy + dy,
+                        cx + 100f, cy, cx + 100f + dx, cy + dy,
+                        durationMs = dur, onDone = cb
+                    )
+                }
+                if (respoof) CursorEngine.executeAndRespoof(context, "three_finger", run, {})
+                else run {}
+            }
         }
     }
 }

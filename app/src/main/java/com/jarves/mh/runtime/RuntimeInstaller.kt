@@ -1455,6 +1455,9 @@ class RuntimeInstaller(private val context: Context) {
         ) { "Invalid project workspace path" }
         workspace.mkdirs()
         File(rootfs, guestWorkspacePath.removePrefix("/")).mkdirs()
+        // Android toolbox shims so the guest ( incl. Desktop Commander agents )
+        // can drive the phone: am/pm/cmd/dumpsys/input/... via loopback.
+        ensurePhoneShims(rootfs)
         // Self-heal devices whose Android tools were installed by an older app
         // version before the global AAPT2 override was persisted.
         writeAndroidGradleConfiguration(rootfs)
@@ -1475,6 +1478,18 @@ class RuntimeInstaller(private val context: Context) {
             // ARM64 Android build tools (notably aapt2) use Bionic's
             // /system/bin/linker64 and, on newer releases, APEX libraries.
             listOf("/system", "/apex", "/vendor", "/product").forEach { hostPath ->
+                if (File(hostPath).exists()) {
+                    File(rootfs, hostPath.removePrefix("/")).mkdirs()
+                    add("-b")
+                    add(hostPath)
+                }
+            }
+            // Android shared storage (/sdcard, /storage/emulated/0). Without
+            // these binds the guest — including Desktop Commander MCP agents —
+            // can see the mounts in /proc/mounts but cannot traverse them, so
+            // Downloads/photos/documents stay invisible. Gated on existence;
+            // actual reads still require the app's storage permission grant.
+            listOf("/storage", "/sdcard").forEach { hostPath ->
                 if (File(hostPath).exists()) {
                     File(rootfs, hostPath.removePrefix("/")).mkdirs()
                     add("-b")
@@ -1524,8 +1539,62 @@ class RuntimeInstaller(private val context: Context) {
         )
     }
 
-    fun ensureSettingsAndHooks() {
-        val hook = File(rootfs, "opt/pocket/permission-hook.sh")
+    /**
+     * Writes Android toolbox shims into the guest (/usr/local/bin) that forward
+     * to the app's loopback CursorServer /phone/exec endpoint, which runs them
+     * as the app UID via ShellRunner. Node is guaranteed present (checked in
+     * initializeExisting). Idempotent: rewrites only when content differs.
+     */
+    fun ensurePhoneShims(rootfs: File) {
+        val binDir = File(rootfs, "usr/local/bin").apply { mkdirs() }
+        val client = File(binDir, "phone-exec.js")
+        val clientCode = """
+            'use strict';
+            const http = require('http');
+            const tool = process.argv[2];
+            const args = process.argv.slice(3);
+            if (!tool) { console.error('usage: phone-exec <tool> [args...]'); process.exit(2); }
+            const payload = JSON.stringify({ argv: [tool].concat(args) });
+            const req = http.request(
+              { host: '127.0.0.1', port: 8899, path: '/phone/exec', method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+              (res) => {
+                let data = '';
+                res.on('data', (c) => { data += c; });
+                res.on('end', () => {
+                  try {
+                    const j = JSON.parse(data);
+                    if (j.out) process.stdout.write(j.out + (j.out.endsWith('\n') ? '' : '\n'));
+                    if (j.err) process.stderr.write(j.err + (j.err.endsWith('\n') ? '' : '\n'));
+                    if (j.error && res.statusCode !== 200) { console.error(j.error); process.exit(1); }
+                    process.exit(typeof j.rc === 'number' ? j.rc : 0);
+                  } catch (e) { console.error('phone-exec: bad response: ' + data); process.exit(1); }
+                });
+              });
+            req.on('error', (e) => { console.error('phone-exec: ' + e.message + ' (is the Cursor server running?)'); process.exit(1); });
+            req.end(payload);
+            """.trimIndent() + "\n"
+        if (!client.exists() || client.readTextOrNull() != clientCode) {
+            client.writeText(clientCode)
+        }
+        listOf(
+            "am", "pm", "cmd", "dumpsys", "input", "settings", "getprop",
+            "svc", "wm", "screencap", "uiautomator", "content", "dpm", "ime", "sm"
+        ).forEach { tool ->
+            val shim = File(binDir, tool)
+            val shimCode = "#!/bin/sh\nexec node /usr/local/bin/phone-exec.js \$tool \"\$@\"\n"
+            if (!shim.exists() || shim.readTextOrNull() != shimCode) {
+                shim.writeText(shimCode)
+                try {
+                    Os.chmod(shim.absolutePath, 0b111101101)
+                } catch (_: Exception) {
+                    shim.setExecutable(true)
+                }
+            }
+        }
+    }
+
+    fun ensureSettingsAndHooks() {        val hook = File(rootfs, "opt/pocket/permission-hook.sh")
         hook.parentFile?.mkdirs()
         hook.writeText(
             """#!/bin/sh

@@ -20,6 +20,7 @@ class MainActivity : ComponentActivity() {
             com.jarves.mh.cursor.CursorServer.start(this)
             com.jarves.mh.cursor.CursorOverlayManager.show(this)
             com.jarves.mh.commander.DesktopCommanderManager.start(this)
+            com.jarves.mh.bridge.AndroidApiBridgeServer.start(this)
         } catch (_: Exception) {}
 
         setContent {
