@@ -165,15 +165,19 @@ object DesktopCommanderManager {
         val streamPort = server?.localPort ?: 0
 
         val termuxScript = buildString {
-            append("echo \$\$ > ~/.desktop-commander.pid; ")
-            append("termux-wake-lock 2>/dev/null; ")
+            append("export HOME=\"/data/data/com.termux/files/home\"; ")
+            append("export PATH=\"/data/data/com.termux/files/usr/bin:\$PATH\"; ")
+            append("export LD_LIBRARY_PATH=\"/data/data/com.termux/files/usr/lib\"; ")
             append("export ANDROID_BRIDGE_URL=\"$bridgeUrl\"; ")
             append("export CI=1; export NPM_CONFIG_YES=true; ")
-            append("CMD=\"desktop-commander\"; command -v desktop-commander >/dev/null 2>&1 || CMD=\"npx --yes @wonderwhy-er/desktop-commander@latest\"; ")
+            append("termux-wake-lock 2>/dev/null; ")
+            append("echo \$\$ > ~/.desktop-commander.pid; ")
+            append("NODE_BIN=\"/data/data/com.termux/files/usr/bin/node\"; ")
+            append("DC_JS=\"/data/data/com.termux/files/usr/lib/node_modules/@wonderwhy-er/desktop-commander/dist/index.js\"; ")
             if (streamPort > 0) {
-                append("{ \$CMD remote 2>&1 | tee ~/.desktop-commander.log; } > /dev/tcp/127.0.0.1/$streamPort 2>&1")
+                append("{ \"\$NODE_BIN\" \"\$DC_JS\" remote 2>&1 | tee ~/.desktop-commander.log; } | \"\$NODE_BIN\" -e 'process.stdin.pipe(require(\"net\").connect($streamPort, \"127.0.0.1\"))' 2>&1")
             } else {
-                append("\$CMD remote > ~/.desktop-commander.log 2>&1")
+                append("\"\$NODE_BIN\" \"\$DC_JS\" remote > ~/.desktop-commander.log 2>&1")
             }
         }
 
@@ -533,7 +537,21 @@ alias screenrecord='screenrecord' service='service' svc='svc'
                 if (_state.value != CommanderState.CONNECTED) {
                     _state.value = CommanderState.WAITING_AUTH
                 }
-                appendOutput("\n🔗 Verification URL detected — opening browser…\n")
+
+                // If user_code is embedded in the URL, extract and copy it immediately
+                val embeddedCode = Regex("user_code=([A-Za-z0-9-]+)", RegexOption.IGNORE_CASE)
+                    .find(url)?.groupValues?.getOrNull(1)?.uppercase()
+                if (embeddedCode != null) {
+                    _info.value = _info.value.copy(verifyCode = embeddedCode)
+                    _pairingCode.value = embeddedCode
+                    try {
+                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                        cm?.setPrimaryClip(android.content.ClipData.newPlainText("MCP Auth Code", embeddedCode))
+                        appendOutput("📋 Auth code copied: $embeddedCode\n")
+                    } catch (_: Exception) {}
+                }
+
+                appendOutput("\n🔗 Opening browser for verification…\n")
                 try {
                     context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -544,10 +562,9 @@ alias screenrecord='screenrecord' service='service' svc='svc'
             }
         }
 
-        // Parse user code  e.g. R7FH-XQ7H (shown on its own line for confirmation)
+        // Parse user code e.g. R7FH-XQ7H if printed separately
         userCodeRegex.find(chunk)?.groupValues?.getOrNull(1)?.let { rawCode ->
             val code = rawCode.trim().uppercase()
-            // Prefer code matching user_code= in URL when available, else accept first valid code
             val urlCode = _info.value.verifyUrl
                 ?.let { Regex("user_code=([A-Za-z0-9-]+)", RegexOption.IGNORE_CASE).find(it)?.groupValues?.getOrNull(1)?.uppercase() }
             val accept = when {
@@ -558,6 +575,11 @@ alias screenrecord='screenrecord' service='service' svc='svc'
             if (accept) {
                 _info.value = _info.value.copy(verifyCode = code)
                 _pairingCode.value = code
+                try {
+                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                    cm?.setPrimaryClip(android.content.ClipData.newPlainText("MCP Auth Code", code))
+                    appendOutput("📋 Auth code copied: $code\n")
+                } catch (_: Exception) {}
             }
         }
 

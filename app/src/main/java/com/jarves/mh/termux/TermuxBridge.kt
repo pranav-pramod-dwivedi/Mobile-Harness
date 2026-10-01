@@ -162,10 +162,39 @@ object TermuxBridge {
         return ContextCompat.checkSelfPermission(context, PERMISSION) == PackageManager.PERMISSION_GRANTED
     }
 
+    fun autoConfigureIfRooted(context: Context): Boolean {
+        return try {
+            val proc = ProcessBuilder("su", "-c",
+                "pm grant ${context.packageName} $PERMISSION; " +
+                "mkdir -p $HOME_DIR/.termux; " +
+                "grep -q 'allow-external-apps' $HOME_DIR/.termux/termux.properties 2>/dev/null || echo 'allow-external-apps = true' >> $HOME_DIR/.termux/termux.properties; " +
+                "am broadcast --user 0 -a com.termux.app.reload_style com.termux"
+            ).redirectErrorStream(true).start()
+            val ok = proc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS) && proc.exitValue() == 0
+            if (ok) {
+                cachedWorking = null
+            }
+            ok
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun checkStatus(context: Context): TermuxStatus {
         if (!isInstalled(context)) return TermuxStatus.NOT_INSTALLED
-        if (!hasPermission(context)) return TermuxStatus.NEEDS_PERMISSION
-        return if (isExecutionWorking(context)) TermuxStatus.READY else TermuxStatus.NEEDS_ALLOW_EXTERNAL_APPS
+        if (!hasPermission(context)) {
+            if (autoConfigureIfRooted(context) && hasPermission(context)) {
+                // successfully auto-granted via root
+            } else {
+                return TermuxStatus.NEEDS_PERMISSION
+            }
+        }
+        if (isExecutionWorking(context)) return TermuxStatus.READY
+        // Try auto-enabling allow-external-apps via root
+        if (autoConfigureIfRooted(context) && isExecutionWorking(context, forceRecheck = true)) {
+            return TermuxStatus.READY
+        }
+        return TermuxStatus.NEEDS_ALLOW_EXTERNAL_APPS
     }
 
     fun isExecutionWorking(context: Context, forceRecheck: Boolean = false): Boolean {
