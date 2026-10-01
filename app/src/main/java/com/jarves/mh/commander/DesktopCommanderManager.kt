@@ -235,113 +235,90 @@ object DesktopCommanderManager {
             val binDir = File(rootfs, "usr/local/bin")
             binDir.mkdirs()
 
+            // ── android CLI ─────────────────────────────────────────────────────
             val script = File(binDir, "android")
             script.writeText("""
 #!/usr/bin/env bash
-# android — Mobile Harness Android API CLI
-# Calls the Android API Bridge at $bridgeUrl
-# Usage: android <command> [args...]
-#   android shell <cmd>         Run an Android shell command
-#   android tap <x> <y>        Tap at coordinates
-#   android swipe <x1> <y1> <x2> <y2> [dur]
-#   android type <text>        Type text
-#   android key <keyname>      Press key (back/home/power/etc)
-#   android battery            Battery info
-#   android wifi               Network info
-#   android clipboard          Read clipboard
-#   android clipboard set <t>  Write clipboard
-#   android open <url>         Open URL in browser
-#   android launch <pkg>       Launch app by package
-#   android notify <title> <msg>  Send notification
-#   android screen             Screen resolution
-#   android device             Device info
-#   android capture            CLI wireframe of current screen
-#   android location           GPS location
-#   android packages           List installed apps
-#   android help               List all endpoints
-
 BRIDGE="${'$'}{ANDROID_BRIDGE_URL:-$bridgeUrl}"
-CMD="${'$'}1"
-shift 2>/dev/null
-
+CMD="${'$'}1"; shift 2>/dev/null
 case "${'$'}CMD" in
   shell|exec)
-    curl -sf "${'$'}BRIDGE/shell" -H 'Content-Type: application/json' \
-      -d "{\"cmd\":\"${'$'}*\"}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('stdout',''))" 2>/dev/null || \
-    curl -sf "${'$'}BRIDGE/shell" -H 'Content-Type: application/json' \
-      -d "{\"cmd\":\"${'$'}*\"}" ;;
-  tap)
-    curl -sf "${'$'}BRIDGE/tap" -H 'Content-Type: application/json' -d "{\"x\":${'$'}1,\"y\":${'$'}2}" ;;
-  swipe)
-    curl -sf "${'$'}BRIDGE/swipe" -H 'Content-Type: application/json' \
-      -d "{\"x1\":${'$'}1,\"y1\":${'$'}2,\"x2\":${'$'}3,\"y2\":${'$'}4,\"duration\":${'$'}{5:-250}}" ;;
-  type|input)
-    curl -sf "${'$'}BRIDGE/type" -H 'Content-Type: application/json' \
-      -d "{\"text\":\"${'$'}*\"}" ;;
-  key)
-    curl -sf "${'$'}BRIDGE/key" -H 'Content-Type: application/json' -d "{\"key\":\"${'$'}1\"}" ;;
-  battery)
-    curl -sf "${'$'}BRIDGE/battery" ;;
-  wifi|network)
-    curl -sf "${'$'}BRIDGE/wifi" ;;
+    if [ "${'$'}#" -eq 0 ]; then exec /system/bin/sh
+    else /system/bin/sh -c "${'$'}*"; fi ;;
+  tap)    curl -sf "${'$'}BRIDGE/tap"   -H 'Content-Type: application/json' -d "{\"x\":${'$'}1,\"y\":${'$'}2}" ;;
+  swipe)  curl -sf "${'$'}BRIDGE/swipe" -H 'Content-Type: application/json' -d "{\"x1\":${'$'}1,\"y1\":${'$'}2,\"x2\":${'$'}3,\"y2\":${'$'}4,\"duration\":${'$'}{5:-250}}" ;;
+  type)   curl -sf "${'$'}BRIDGE/type"  -H 'Content-Type: application/json' -d "{\"text\":\"${'$'}*\"}" ;;
+  key)    /system/bin/input keyevent "${'$'}1" ;;
+  battery)  curl -sf "${'$'}BRIDGE/battery" ;;
+  wifi)     curl -sf "${'$'}BRIDGE/wifi" ;;
   clipboard)
-    if [ "${'$'}1" = "set" ]; then shift
-      curl -sf "${'$'}BRIDGE/clipboard" -X POST -H 'Content-Type: application/json' \
-        -d "{\"text\":\"${'$'}*\"}"
-    else
-      curl -sf "${'$'}BRIDGE/clipboard" | python3 -c "import sys,json; print(json.load(sys.stdin).get('text',''))" 2>/dev/null
-    fi ;;
-  open)
-    curl -sf "${'$'}BRIDGE/open" -H 'Content-Type: application/json' -d "{\"url\":\"${'$'}1\"}" ;;
-  launch)
-    curl -sf "${'$'}BRIDGE/launch" -H 'Content-Type: application/json' -d "{\"package\":\"${'$'}1\"}" ;;
-  notify|notification)
-    curl -sf "${'$'}BRIDGE/notify" -H 'Content-Type: application/json' \
-      -d "{\"title\":\"${'$'}1\",\"message\":\"${'$'}2\"}" ;;
-  screen)
-    curl -sf "${'$'}BRIDGE/screen" ;;
-  device|info)
-    curl -sf "${'$'}BRIDGE/device" ;;
-  capture|spoof|screenshot)
-    curl -sf "${'$'}BRIDGE/capture" | python3 -c "import sys,json; print(json.load(sys.stdin).get('screen_text',''))" 2>/dev/null || \
-    curl -sf "${'$'}BRIDGE/capture" ;;
-  location|gps)
-    curl -sf "${'$'}BRIDGE/location" ;;
-  packages|apps)
-    curl -sf "${'$'}BRIDGE/packages" ;;
+    if [ "${'$'}1" = "set" ]; then shift; curl -sf "${'$'}BRIDGE/clipboard" -X POST -H 'Content-Type: application/json' -d "{\"text\":\"${'$'}*\"}"
+    else curl -sf "${'$'}BRIDGE/clipboard" | python3 -c "import sys,json; print(json.load(sys.stdin).get('text',''))" 2>/dev/null; fi ;;
+  open)     /system/bin/am start -a android.intent.action.VIEW -d "${'$'}1" ;;
+  launch)   /system/bin/pm path "${'$'}1" >/dev/null 2>&1 && /system/bin/monkey -p "${'$'}1" -c android.intent.category.LAUNCHER 1 ;;
+  notify)   curl -sf "${'$'}BRIDGE/notify" -H 'Content-Type: application/json' -d "{\"title\":\"${'$'}1\",\"message\":\"${'$'}2\"}" ;;
+  screen)   /system/bin/wm size && /system/bin/wm density ;;
+  device)   echo "$(getprop ro.product.manufacturer) $(getprop ro.product.model) Android $(getprop ro.build.version.release)" ;;
+  capture)  curl -sf "${'$'}BRIDGE/capture" | python3 -c "import sys,json; print(json.load(sys.stdin).get('screen_text',''))" 2>/dev/null ;;
+  location) curl -sf "${'$'}BRIDGE/location" ;;
+  packages) /system/bin/pm list packages "${'$'}@" ;;
   settings)
-    if [ -n "${'$'}2" ]; then
-      curl -sf "${'$'}BRIDGE/settings" -X POST -H 'Content-Type: application/json' \
-        -d "{\"key\":\"${'$'}1\",\"value\":\"${'$'}2\"}"
-    else
-      curl -sf "${'$'}BRIDGE/settings?key=${'$'}1"
-    fi ;;
-  contacts)
-    curl -sf "${'$'}BRIDGE/contacts" ;;
-  help|--help|-h|"")
-    curl -sf "${'$'}BRIDGE/help" | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-print('Android API Bridge —', d.get('name',''))
-for e in d.get('endpoints',[]):
-  print(' ', e)" 2>/dev/null || curl -sf "${'$'}BRIDGE/help" ;;
-  *)
-    # Unknown command — try as raw endpoint
-    curl -sf "${'$'}BRIDGE/${'$'}CMD" "${'$'}@" ;;
+    if [ -n "${'$'}2" ]; then /system/bin/settings put system "${'$'}1" "${'$'}2"
+    else /system/bin/settings get system "${'$'}1" 2>/dev/null || /system/bin/settings get secure "${'$'}1" 2>/dev/null || /system/bin/settings get global "${'$'}1"; fi ;;
+  contacts) curl -sf "${'$'}BRIDGE/contacts" ;;
+  help|"")
+    echo "NATIVE: shell, key, open, launch, screen, device, packages, settings"
+    echo "BRIDGE: battery, wifi, clipboard, tap, swipe, type, notify, capture, location" ;;
+  *) /system/bin/sh -c "${'$'}CMD ${'$'}*" ;;
 esac
 """.trimIndent())
             script.setExecutable(true)
 
-            // Append to .bashrc inside rootfs
+            // ── adb shim — maps adb shell to /system/bin/sh directly ───────────
+            val adbScript = File(binDir, "adb")
+            adbScript.writeText("""
+#!/usr/bin/env bash
+# adb shim — native Android shell, no ADB daemon needed
+BRIDGE="${'$'}{ANDROID_BRIDGE_URL:-$bridgeUrl}"
+CMD="${'$'}1"; shift 2>/dev/null
+case "${'$'}CMD" in
+  shell)
+    if [ "${'$'}#" -eq 0 ]; then exec /system/bin/sh
+    else /system/bin/sh -c "${'$'}*"; fi ;;
+  devices)
+    echo "List of devices attached"
+    echo "$(getprop ro.serialno 2>/dev/null || echo 'mhdevice')	device" ;;
+  install)   /system/bin/pm install "${'$'}@" ;;
+  uninstall) /system/bin/pm uninstall "${'$'}@" ;;
+  push|pull) cp "${'$'}1" "${'$'}2" ;;
+  logcat)    /system/bin/logcat "${'$'}@" ;;
+  reboot)    /system/bin/sh -c "reboot ${'$'}*" ;;
+  tcpip|usb|connect|disconnect|forward|reverse)
+    echo "[adb-shim] Already on-device — no network ADB needed" ;;
+  *)         /system/bin/sh -c "${'$'}CMD ${'$'}*" ;;
+esac
+""".trimIndent())
+            adbScript.setExecutable(true)
+
+            // ── .bashrc: full Android PATH + aliases ───────────────────────────
             val bashrc = File(rootfs, "root/.bashrc")
-            val bridgeLine = "export ANDROID_BRIDGE_URL=\"$bridgeUrl\""
-            val pathLine = "export PATH=\"/usr/local/bin:\$PATH\""
             val existing = bashrc.takeIf { it.exists() }?.readText() ?: ""
             if (!existing.contains("ANDROID_BRIDGE_URL")) {
-                bashrc.appendText("\n# Android API Bridge (Mobile Harness)\n$bridgeLine\n$pathLine\n")
+                bashrc.appendText("""
+
+# Mobile Harness — Android native terminal
+export ANDROID_BRIDGE_URL="$bridgeUrl"
+export PATH="/usr/local/bin:/system/bin:/system/xbin:/vendor/bin:/sbin:${'$'}PATH"
+alias am='am' pm='pm' dumpsys='dumpsys' input='input'
+alias getprop='getprop' setprop='setprop' cmd='cmd' wm='wm'
+alias settings='settings' logcat='logcat' screencap='screencap'
+alias screenrecord='screenrecord' service='service' svc='svc'
+""".trimIndent() + "\n")
+            } else if (!existing.contains("/system/bin")) {
+                bashrc.appendText("export PATH=\"/system/bin:/system/xbin:/vendor/bin:\$PATH\"\n")
             }
 
-            Log.i(TAG, "Android helper script installed at ${script.absolutePath}")
+            Log.i(TAG, "Android helper + adb shim installed at ${binDir.absolutePath}")
         } catch (e: Exception) {
             Log.w(TAG, "Could not install android helper: ${e.message}")
         }
