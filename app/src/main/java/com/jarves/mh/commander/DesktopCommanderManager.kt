@@ -167,8 +167,10 @@ object DesktopCommanderManager {
         ensureTermuxPatched(appCtx)
 
         val termuxScript = buildString {
+            append("killall -9 node 2>/dev/null; sleep 1; ")
             append("export HOME=\"/data/data/com.termux/files/home\"; ")
-            append("export PATH=\"/data/data/com.termux/files/usr/bin:\$PATH\"; ")
+            append("export PATH=\"/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/system/bin:/system/xbin:/product/bin:/apex/com.android.runtime/bin:/vendor/bin\"; ")
+            append("export TMPDIR=\"/tmp\"; export TEMP=\"/tmp\"; export TMP=\"/tmp\"; ")
             append("export LD_LIBRARY_PATH=\"/data/data/com.termux/files/usr/lib\"; ")
             append("export SHELL=\"/data/data/com.termux/files/usr/bin/bash\"; ")
             append("export ANDROID_BRIDGE_URL=\"$bridgeUrl\"; ")
@@ -494,9 +496,69 @@ alias screenrecord='screenrecord' service='service' svc='svc'
 
     private fun ensureTermuxPatched(appCtx: Context) {
         val patchScript = """
+            # 1. Mount /tmp as tmpfs so standard unix redirects (> /tmp/file) succeed
+            if command -v su >/dev/null 2>&1; then
+                su -c 'mkdir -p /tmp 2>/dev/null; (mountpoint -q /tmp || mount -t tmpfs -o mode=777,context="u:object_r:tmpfs:s0" tmpfs /tmp 2>/dev/null || mount -t tmpfs -o mode=777 tmpfs /tmp 2>/dev/null); chmod 777 /tmp 2>/dev/null' 2>/dev/null
+            fi
+
+            # 2. Setup Termux profile.pre and .bashrc for full PATH resolution
+            mkdir -p /data/data/com.termux/files/usr/etc /data/data/com.termux/files/home
+            cat << 'ENV_EOF' > /data/data/com.termux/files/usr/etc/profile.pre
+export HOME="/data/data/com.termux/files/home"
+export PATH="/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/system/bin:/system/xbin:/product/bin:/apex/com.android.runtime/bin:/vendor/bin"
+export TMPDIR="/tmp"
+export TEMP="/tmp"
+export TMP="/tmp"
+export SHELL="/data/data/com.termux/files/usr/bin/bash"
+export ANDROID_BRIDGE_URL="http://localhost:9898"
+ENV_EOF
+            chmod 644 /data/data/com.termux/files/usr/etc/profile.pre
+
+            cat << 'RC_EOF' > /data/data/com.termux/files/home/.bashrc
+export HOME="/data/data/com.termux/files/home"
+export PATH="/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/system/bin:/system/xbin:/product/bin:/apex/com.android.runtime/bin:/vendor/bin"
+export TMPDIR="/tmp"
+export TEMP="/tmp"
+export TMP="/tmp"
+export SHELL="/data/data/com.termux/files/usr/bin/bash"
+export ANDROID_BRIDGE_URL="http://localhost:9898"
+RC_EOF
+            chmod 644 /data/data/com.termux/files/home/.bashrc
+
+            cat << 'PROF_EOF' > /data/data/com.termux/files/home/.profile
+[ -r ~/.bashrc ] && . ~/.bashrc
+PROF_EOF
+            chmod 644 /data/data/com.termux/files/home/.profile
+
+            # 3. Create root wrapper binaries for Android system tools
+            for tool in dumpsys monkey input screencap screenrecord service svc settings cmd; do
+                target="/data/data/com.termux/files/usr/bin/${'$'}tool"
+                cat << WRAP_EOF > "${'$'}target"
+#!/data/data/com.termux/files/usr/bin/sh
+if command -v su >/dev/null 2>&1; then
+    exec su -c "/system/bin/${'$'}tool" "${'$'}@"
+fi
+exec /system/bin/${'$'}tool "${'$'}@"
+WRAP_EOF
+                chmod 755 "${'$'}target"
+            done
+
+            # Special wrapper for am (falls back to termuxam if su unavailable)
+            cat << 'AM_EOF' > /data/data/com.termux/files/usr/bin/am
+#!/data/data/com.termux/files/usr/bin/sh
+if command -v su >/dev/null 2>&1; then
+    exec su -c "/system/bin/am" "$@"
+fi
+exec /system/bin/app_process -Xnoimage-dex2oat / com.termux.termuxam.Am "$@"
+AM_EOF
+            chmod 755 /data/data/com.termux/files/usr/bin/am
+
+            # 4. Patch Desktop Commander Node.js files
             node -e '
             const fs = require("fs");
             const path = "/data/data/com.termux/files/usr/lib/node_modules/@wonderwhy-er/desktop-commander/dist";
+            const fullPath = "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/system/bin:/system/xbin:/product/bin:/apex/com.android.runtime/bin:/vendor/bin";
+            
             const tm = path + "/terminal-manager.js";
             if (fs.existsSync(tm)) {
                 let c = fs.readFileSync(tm, "utf8");
@@ -504,9 +566,16 @@ alias screenrecord='screenrecord' service='service' svc='svc'
                     c = c.replace("function getShellSpawnArgs(shellPath, command) {", "function getShellSpawnArgs(shellPath, command) {\n    if (!shellPath || shellPath === \"/bin/sh\" || shellPath === \"/bin/bash\") shellPath = \"/data/data/com.termux/files/usr/bin/bash\";");
                     c = c.replace(/shellToUse = config\.defaultShell \|\| true;/g, "shellToUse = \"/data/data/com.termux/files/usr/bin/bash\";");
                     c = c.replace(/shellToUse = true;/g, "shellToUse = \"/data/data/com.termux/files/usr/bin/bash\";");
-                    fs.writeFileSync(tm, c, "utf8");
                 }
+                if (!c.includes("DC_TM_ENV_PATCHED")) {
+                    c = c.replace(
+                        "windowsHide: true // Prevent visible console windows on Windows",
+                        "windowsHide: true, cwd: \"/data/data/com.termux/files/home\", env: { ...process.env, HOME: \"/data/data/com.termux/files/home\", SHELL: \"/data/data/com.termux/files/usr/bin/bash\", TMPDIR: \"/tmp\", PATH: \"" + fullPath + "\", TERM: \"xterm-256color\", DC_TM_ENV_PATCHED: \"true\" }"
+                    );
+                }
+                fs.writeFileSync(tm, c, "utf8");
             }
+
             const ipt = path + "/tools/improved-process-tools.js";
             if (fs.existsSync(ipt)) {
                 let c = fs.readFileSync(ipt, "utf8");
@@ -516,6 +585,19 @@ alias screenrecord='screenrecord' service='service' svc='svc'
                     fs.writeFileSync(ipt, c, "utf8");
                 }
             }
+
+            const dci = path + "/remote-device/desktop-commander-integration.js";
+            if (fs.existsSync(dci)) {
+                let c = fs.readFileSync(dci, "utf8");
+                if (!c.includes("DC_ANDROID_ENV_PATCHED")) {
+                    c = c.replace(
+                        "env: { ...getDefaultEnvironment(), ...config.env, DC_REMOTE_DEVICE: '\''true'\'' }",
+                        "env: { ...getDefaultEnvironment(), ...config.env, HOME: \"/data/data/com.termux/files/home\", SHELL: \"/data/data/com.termux/files/usr/bin/bash\", TMPDIR: \"/tmp\", PATH: \"" + fullPath + "\", DC_REMOTE_DEVICE: \"true\", DC_ANDROID_ENV_PATCHED: \"true\" }"
+                    );
+                    fs.writeFileSync(dci, c, "utf8");
+                }
+            }
+
             const cm = path + "/command-manager.js";
             if (fs.existsSync(cm)) {
                 let c = fs.readFileSync(cm, "utf8");
@@ -527,7 +609,7 @@ alias screenrecord='screenrecord' service='service' svc='svc'
             ' 2>/dev/null
         """.trimIndent()
         try {
-            com.jarves.mh.termux.TermuxBridge.executeSync(appCtx, "patch-dc", patchScript, 10_000L)
+            com.jarves.mh.termux.TermuxBridge.executeSync(appCtx, "patch-dc", patchScript, 15_000L)
         } catch (_: Exception) {}
     }
 
