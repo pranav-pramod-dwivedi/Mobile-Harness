@@ -15,8 +15,16 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
 
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <queries>
+        <package android:name="com.termux" />
+        <intent>
+            <action android:name="com.termux.RUN_COMMAND" />
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="false"
@@ -98,5 +106,8 @@
         <receiver
             android:name=".runtime.AndroidAppInstallReceiver"
             android:exported="false" />
+        <receiver
+            android:name=".termux.TermuxResultReceiver"
+            android:exported="true" />
     </application>
 </manifest>

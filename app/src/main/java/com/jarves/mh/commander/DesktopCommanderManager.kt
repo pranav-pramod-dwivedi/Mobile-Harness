@@ -25,6 +25,11 @@ enum class CommanderState {
     STOPPED
 }
 
+enum class CommanderBackend {
+    PROOT,
+    TERMUX
+}
+
 data class CommanderInfo(
     val deviceId: String? = null,
     val deviceName: String? = null,
@@ -42,6 +47,9 @@ object DesktopCommanderManager {
     private var process: Process? = null
     private var processStdin: OutputStream? = null
     private var installer: RuntimeInstaller? = null
+    private var appContext: Context? = null
+    private var termuxStreamServer: java.net.ServerSocket? = null
+    private var termuxClientSocket: java.net.Socket? = null
 
     // ---- Public state flows ----
     private val _state = MutableStateFlow(CommanderState.IDLE)
@@ -84,9 +92,18 @@ object DesktopCommanderManager {
     private val sessionRestoredRegex = Regex("Session restored", RegexOption.IGNORE_CASE)
     private val waitingAuthRegex  = Regex("Waiting for authorization", RegexOption.IGNORE_CASE)
 
+    // Backend selection: PROOT (built-in Debian) vs TERMUX (unrestricted native Bionic)
+    private val _backend = MutableStateFlow(CommanderBackend.TERMUX)
+    val backend: StateFlow<CommanderBackend> = _backend.asStateFlow()
+
+    fun setBackend(b: CommanderBackend) {
+        _backend.value = b
+    }
+
     fun start(context: Context) {
         if (_isActive.value) return
         val appCtx = context.applicationContext ?: context
+        appContext = appCtx
         installer = RuntimeInstaller(appCtx)
         _terminalOutput.value = ""
         _pendingUrl.value = null
@@ -98,117 +115,208 @@ object DesktopCommanderManager {
 
         scope.launch {
             try {
-                val inst = installer ?: return@launch
-                if (!inst.isInstalled()) {
-                    appendOutput("⚠ Subsystem not installed yet. Complete the main setup first.\n")
-                    _state.value = CommanderState.ERROR
-                    _isActive.value = false
-                    return@launch
-                }
-
-                val installed = inst.installedRuntime()
-                val workspace = File(installed.rootfs, "root")
-                workspace.mkdirs()
-
-                appendOutput("🚀 Starting Desktop Commander Remote…\n")
-                appendOutput(
-                    "📱 Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} " +
-                        "(Android ${android.os.Build.VERSION.RELEASE})\n"
-                )
-                appendOutput(
-                    "🤖 Android bridge ready: am, pm, cmd, dumpsys, input, settings, " +
-                        "getprop, svc, wm, screencap, uiautomator work in this shell " +
-                        "(e.g. am start -a android.intent.action.VIEW -d " +
-                        "'https://youtube.com'). /sdcard and /storage are mounted.\n"
-                )
-
-                val outputFile = File(appCtx.cacheDir, "desktop-commander-out.log")
-                outputFile.delete()
-
-                val bridgePort = com.jarves.mh.bridge.AndroidApiBridgeServer.PORT
-                val bridgeUrl  = "http://localhost:$bridgePort"
-
-                // Install the 'android' helper CLI once into the PRoot rootfs
-                installAndroidHelperScript(installed.rootfs, bridgeUrl)
-
-                val guestCommand = listOf(
-                    "/usr/bin/env", "bash", "-lc",
-                    "npx --yes @wonderwhy-er/desktop-commander@latest remote"
-                )
-
-                val proc = inst.process(
-                    proot    = installed.proot,
-                    rootfs   = installed.rootfs,
-                    workspace = workspace,
-                    environment = mapOf(
-                        "HOME" to "/root",
-                        "CI"   to "1",
-                        "NPM_CONFIG_YES" to "true",
-                        "TERM" to "xterm-256color",
-                        // Android API Bridge — the AI can use curl/wget to call these
-                        "ANDROID_BRIDGE_URL"  to bridgeUrl,
-                        "ANDROID_BRIDGE_PORT" to "$bridgePort",
-                        // Human-readable Android identity
-                        "JARVIS_DEVICE_MODEL"        to android.os.Build.MODEL,
-                        "JARVIS_DEVICE_MANUFACTURER" to android.os.Build.MANUFACTURER,
-                        "JARVIS_DEVICE_ANDROID"      to android.os.Build.VERSION.RELEASE,
-                        "JARVIS_DEVICE_FINGERPRINT"  to android.os.Build.FINGERPRINT,
-                    ),
-                    guestCommand = guestCommand,
-                    outputFile   = outputFile,
-                    pseudoTerminal = false
-                )
-
-                process = proc
-
-                // Try to get stdin so we can send "y\n" if npm still asks interactively
-                try {
-                    processStdin = proc.outputStream
-                } catch (_: Exception) {}
-
-                var offset = 0L
-                val outputBuffer = StringBuilder()
-
-                while (proc.isAlive || (outputFile.exists() && outputFile.length() > offset)) {
-                    val currentLen = outputFile.length()
-                    if (currentLen > offset) {
-                        val available = (currentLen - offset).toInt()
-                        val bytes = ByteArray(minOf(available, 16384))
-                        RandomAccessFile(outputFile, "r").use { raf ->
-                            raf.seek(offset)
-                            val read = raf.read(bytes)
-                            if (read > 0) {
-                                offset += read
-                                val chunk = bytes.decodeToString(0, read)
-                                outputBuffer.append(chunk)
-                                _terminalOutput.value = outputBuffer.toString().takeLast(8000)
-                                processChunk(chunk, appCtx)
-                            }
-                        }
-                    } else {
-                        delay(150)
+                if (_backend.value == CommanderBackend.TERMUX && com.jarves.mh.termux.TermuxBridge.hasPermission(appCtx)) {
+                    startTermux(appCtx)
+                } else {
+                    if (_backend.value == CommanderBackend.TERMUX) {
+                        appendOutput("ℹ Termux permission not granted. Running in built-in PRoot…\n")
                     }
+                    startPRoot(appCtx)
                 }
-
-                val exit = proc.waitFor()
-                appendOutput("\n[Exited with code $exit]\n")
-                _state.value = if (exit == 0) CommanderState.STOPPED else CommanderState.ERROR
-                _isActive.value = false
-
             } catch (e: Exception) {
-                Log.e(TAG, "Error", e)
+                Log.e(TAG, "Error in start", e)
                 appendOutput("\n[Error: ${e.message}]\n")
                 _state.value = CommanderState.ERROR
                 _isActive.value = false
-            } finally {
-                process = null
-                processStdin = null
             }
         }
     }
 
+    private suspend fun startTermux(appCtx: Context) {
+        appendOutput("🚀 Starting Desktop Commander in Termux (Unrestricted native mode)…\n")
+        appendOutput("📱 Native Bionic environment with wake-lock active.\n")
+
+        val bridgePort = com.jarves.mh.bridge.AndroidApiBridgeServer.PORT
+        val bridgeUrl = "http://localhost:$bridgePort"
+
+        // Check if Node.js & npx are installed in Termux
+        val checkNode = withContext(Dispatchers.IO) {
+            com.jarves.mh.termux.TermuxBridge.executeSync(appCtx, "check-node", "command -v node && command -v npx")
+        }
+        if (checkNode == null || !checkNode.isSuccess || checkNode.stdout.isNullOrBlank()) {
+            appendOutput("📦 Node.js / npx not found in Termux. Running bootstrap setup...\n")
+            withContext(Dispatchers.IO) {
+                com.jarves.mh.termux.TermuxBridge.executeSync(
+                    appCtx, "install-node",
+                    "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs-lts npm termux-api android-tools",
+                    120_000L
+                )
+            }
+        }
+
+        // Start a local TCP server to receive real-time stdout/stderr from Termux
+        val server = try {
+            java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create Termux stream ServerSocket", e)
+            null
+        }
+        termuxStreamServer = server
+        val streamPort = server?.localPort ?: 0
+
+        val termuxScript = buildString {
+            append("echo \$\$ > ~/.desktop-commander.pid; ")
+            append("termux-wake-lock 2>/dev/null; ")
+            append("export ANDROID_BRIDGE_URL=\"$bridgeUrl\"; ")
+            append("export CI=1; export NPM_CONFIG_YES=true; ")
+            append("CMD=\"desktop-commander\"; command -v desktop-commander >/dev/null 2>&1 || CMD=\"npx --yes @wonderwhy-er/desktop-commander@latest\"; ")
+            if (streamPort > 0) {
+                append("{ \$CMD remote 2>&1 | tee ~/.desktop-commander.log; } > /dev/tcp/127.0.0.1/$streamPort 2>&1")
+            } else {
+                append("\$CMD remote > ~/.desktop-commander.log 2>&1")
+            }
+        }
+
+        val launched = com.jarves.mh.termux.TermuxBridge.launchBackground(
+            appCtx, "DesktopCommander", termuxScript
+        )
+
+        if (!launched) {
+            appendOutput("⚠ Failed to dispatch to Termux. Falling back to built-in PRoot…\n")
+            runCatching { server?.close() }
+            termuxStreamServer = null
+            startPRoot(appCtx)
+            return
+        }
+
+        if (server != null) {
+            withContext(Dispatchers.IO) {
+                try {
+                    server.soTimeout = 25_000
+                    val client = server.accept()
+                    termuxClientSocket = client
+                    val reader = client.getInputStream().bufferedReader()
+                    val charBuf = CharArray(2048)
+                    val outputBuffer = StringBuilder()
+
+                    while (_isActive.value) {
+                        val count = reader.read(charBuf)
+                        if (count == -1) break
+                        val chunk = String(charBuf, 0, count)
+                        outputBuffer.append(chunk)
+                        _terminalOutput.value = outputBuffer.toString().takeLast(8000)
+                        processChunk(chunk, appCtx)
+                    }
+                } catch (e: Exception) {
+                    if (_isActive.value) {
+                        Log.i(TAG, "Termux stream ended or timed out: ${e.message}")
+                    }
+                } finally {
+                    runCatching { server.close() }
+                    termuxStreamServer = null
+                    runCatching { termuxClientSocket?.close() }
+                    termuxClientSocket = null
+                }
+            }
+        }
+    }
+
+    private suspend fun startPRoot(appCtx: Context) {
+        val inst = installer ?: return
+        if (!inst.isInstalled()) {
+            appendOutput("⚠ Subsystem not installed yet. Complete the main setup first.\n")
+            _state.value = CommanderState.ERROR
+            _isActive.value = false
+            return
+        }
+
+        val installed = inst.installedRuntime()
+        val workspace = File(installed.rootfs, "root")
+        workspace.mkdirs()
+
+        appendOutput("🚀 Starting Desktop Commander Remote (Built-in PRoot)…\n")
+        appendOutput(
+            "📱 Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} " +
+                "(Android ${android.os.Build.VERSION.RELEASE})\n"
+        )
+
+        val outputFile = File(appCtx.cacheDir, "desktop-commander-out.log")
+        outputFile.delete()
+
+        val bridgePort = com.jarves.mh.bridge.AndroidApiBridgeServer.PORT
+        val bridgeUrl  = "http://localhost:$bridgePort"
+
+        // Install the 'android', 'adb', and 'termux' helper CLIs into PRoot rootfs
+        installAndroidHelperScript(installed.rootfs, bridgeUrl)
+
+        val guestCommand = listOf(
+            "/usr/bin/env", "bash", "-lc",
+            "npx --yes @wonderwhy-er/desktop-commander@latest remote"
+        )
+
+        val proc = inst.process(
+            proot    = installed.proot,
+            rootfs   = installed.rootfs,
+            workspace = workspace,
+            environment = mapOf(
+                "HOME" to "/root",
+                "CI"   to "1",
+                "NPM_CONFIG_YES" to "true",
+                "TERM" to "xterm-256color",
+                "ANDROID_BRIDGE_URL"  to bridgeUrl,
+                "ANDROID_BRIDGE_PORT" to "$bridgePort",
+                "JARVIS_DEVICE_MODEL"        to android.os.Build.MODEL,
+                "JARVIS_DEVICE_MANUFACTURER" to android.os.Build.MANUFACTURER,
+                "JARVIS_DEVICE_ANDROID"      to android.os.Build.VERSION.RELEASE,
+                "JARVIS_DEVICE_FINGERPRINT"  to android.os.Build.FINGERPRINT,
+            ),
+            guestCommand = guestCommand,
+            outputFile   = outputFile,
+            pseudoTerminal = false
+        )
+
+        process = proc
+
+        try {
+            processStdin = proc.outputStream
+        } catch (_: Exception) {}
+
+        var offset = 0L
+        val outputBuffer = StringBuilder()
+
+        while (proc.isAlive || (outputFile.exists() && outputFile.length() > offset)) {
+            val currentLen = outputFile.length()
+            if (currentLen > offset) {
+                val available = (currentLen - offset).toInt()
+                val bytes = ByteArray(minOf(available, 16384))
+                RandomAccessFile(outputFile, "r").use { raf ->
+                    raf.seek(offset)
+                    val read = raf.read(bytes)
+                    if (read > 0) {
+                        offset += read
+                        val chunk = bytes.decodeToString(0, read)
+                        outputBuffer.append(chunk)
+                        _terminalOutput.value = outputBuffer.toString().takeLast(8000)
+                        processChunk(chunk, appCtx)
+                    }
+                }
+            } else {
+                delay(150)
+            }
+        }
+
+        val exit = proc.waitFor()
+        appendOutput("\n[Exited with code $exit]\n")
+        _state.value = if (exit == 0) CommanderState.STOPPED else CommanderState.ERROR
+        _isActive.value = false
+        process = null
+        processStdin = null
+    }
+
     fun stop() {
+        val appCtx = appContext
         scope.launch {
+            _isActive.value = false
             try {
                 processStdin?.close()
                 process?.destroy()
@@ -217,7 +325,23 @@ object DesktopCommanderManager {
             } catch (_: Exception) {}
             process = null
             processStdin = null
-            _isActive.value = false
+
+            runCatching { termuxClientSocket?.close() }
+            termuxClientSocket = null
+            runCatching { termuxStreamServer?.close() }
+            termuxStreamServer = null
+
+            try {
+                appCtx?.let {
+                    if (com.jarves.mh.termux.TermuxBridge.hasPermission(it)) {
+                        com.jarves.mh.termux.TermuxBridge.launchBackground(
+                            it, "StopDC",
+                            "test -f ~/.desktop-commander.pid && kill -9 $(cat ~/.desktop-commander.pid) 2>/dev/null; killall node 2>/dev/null; termux-wake-unlock 2>/dev/null; rm -f ~/.desktop-commander.pid"
+                        )
+                    }
+                }
+            } catch (_: Exception) {}
+
             _state.value = CommanderState.STOPPED
             appendOutput("\n[Stopped by user]\n")
         }
@@ -299,6 +423,41 @@ case "${'$'}CMD" in
 esac
 """.trimIndent())
             adbScript.setExecutable(true)
+
+            // ── termux CLI shim — routes to /termux/exec on bridge ──────────────
+            val termuxScript = File(binDir, "termux")
+            termuxScript.writeText("""
+#!/usr/bin/env bash
+BRIDGE="${'$'}{ANDROID_BRIDGE_URL:-$bridgeUrl}"
+if [ "${'$'}#" -eq 0 ]; then
+  curl -sf "${'$'}BRIDGE/termux/status"
+  exit 0
+fi
+
+CMD_ARG="$(python3 -c "import json,sys; print(json.dumps(' '.join(sys.argv[1:])))" "$@")"
+curl -sf "${'$'}BRIDGE/termux/exec" -H 'Content-Type: application/json' \
+  -d "{\"cmd\": ${'$'}CMD_ARG}" | \
+  python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    if 'stdout' in d: sys.stdout.write(d['stdout'])
+    if 'stderr' in d: sys.stderr.write(d['stderr'])
+    if 'error' in d: sys.stderr.write('Error: ' + str(d['error']) + '\n')
+    sys.exit(d.get('exit_code', 0))
+except Exception as e:
+    sys.stderr.write(str(e) + '\n')
+    sys.exit(1)
+"
+""".trimIndent())
+            termuxScript.setExecutable(true)
+
+            val termuxExecScript = File(binDir, "termux-exec")
+            termuxExecScript.writeText("""
+#!/usr/bin/env bash
+exec /usr/local/bin/termux "${'$'}@"
+""".trimIndent())
+            termuxExecScript.setExecutable(true)
 
             // ── .bashrc: full Android PATH + aliases ───────────────────────────
             val bashrc = File(rootfs, "root/.bashrc")

@@ -3,10 +3,14 @@ package com.jarves.mh.ui
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -28,8 +32,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.jarves.mh.commander.CommanderBackend
 import com.jarves.mh.commander.CommanderState
 import com.jarves.mh.commander.DesktopCommanderManager
+import com.jarves.mh.termux.TermuxBridge
+import com.jarves.mh.termux.TermuxStatus
 import kotlinx.coroutines.delay
 
 @Composable
@@ -41,6 +48,21 @@ fun McpSetupScreen() {
     val isActive by DesktopCommanderManager.isActive.collectAsState()
     val output by DesktopCommanderManager.terminalOutput.collectAsState()
     val info by DesktopCommanderManager.info.collectAsState()
+    val backend by DesktopCommanderManager.backend.collectAsState()
+
+    var termuxStatus by remember { mutableStateOf(TermuxBridge.checkStatus(context)) }
+    var showTermuxGuide by remember { mutableStateOf(false) }
+
+    val termuxPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        termuxStatus = TermuxBridge.checkStatus(context)
+        if (granted) {
+            Toast.makeText(context, "Termux RUN_COMMAND permission granted", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "Permission denied. Enable in Settings > Apps > Mobile-Harness", Toast.LENGTH_LONG).show()
+        }
+    }
 
     val scrollState = rememberScrollState()
     val termScrollState = rememberScrollState()
@@ -84,6 +106,38 @@ fun McpSetupScreen() {
                     fontSize = 11.sp, fontFamily = FontFamily.Monospace)
             }
             StatusPill(state)
+        }
+
+        // ── Backend Environment Selector (Termux vs PRoot) ───────────────────
+        ExecutionEnvironmentCard(
+            currentBackend = backend,
+            onBackendSelected = { DesktopCommanderManager.setBackend(it) },
+            termuxStatus = termuxStatus,
+            onConfigureTermux = { showTermuxGuide = !showTermuxGuide }
+        )
+
+        // ── Termux Setup Guidance Card ───────────────────────────────────────
+        AnimatedVisibility(
+            visible = (backend == CommanderBackend.TERMUX && termuxStatus != TermuxStatus.READY) || showTermuxGuide,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut()
+        ) {
+            TermuxSetupActionCard(
+                status = termuxStatus,
+                onCopyScript = {
+                    clipboard.setText(AnnotatedString(TermuxBridge.BOOTSTRAP_SCRIPT))
+                    Toast.makeText(context, "Bootstrap script copied to clipboard", Toast.LENGTH_SHORT).show()
+                },
+                onLaunchTermux = {
+                    TermuxBridge.openTermux(context)
+                },
+                onRequestPermission = {
+                    termuxPermLauncher.launch(TermuxBridge.PERMISSION)
+                },
+                onInstallTermux = {
+                    TermuxBridge.openInstallPage(context, fdroid = true)
+                }
+            )
         }
 
         // ── DEVICE CODE VERIFICATION CARD (the main new UI) ──────────────────
@@ -467,5 +521,309 @@ private fun InfoRow(label: String, value: String) {
         Text("$label:", color = Color(0xFF64748B), fontSize = 11.sp,
             fontFamily = FontFamily.Monospace, modifier = Modifier.width(52.dp))
         Text(value, color = Color(0xFFE2E8F0), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+    }
+}
+
+@Composable
+private fun ExecutionEnvironmentCard(
+    currentBackend: CommanderBackend,
+    onBackendSelected: (CommanderBackend) -> Unit,
+    termuxStatus: TermuxStatus,
+    onConfigureTermux: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF0C1322)),
+        shape = RoundedCornerShape(14.dp),
+        border = CardDefaults.outlinedCardBorder().copy(
+            brush = androidx.compose.ui.graphics.SolidColor(Color(0xFF1E293B))
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Tune,
+                        contentDescription = null,
+                        tint = Color(0xFF00F0FF),
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        "EXECUTION RUNTIME",
+                        color = Color(0xFF00F0FF),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+                TermuxAvailabilityBadge(status = termuxStatus, onClick = onConfigureTermux)
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Termux option
+                val isTermux = currentBackend == CommanderBackend.TERMUX
+                Surface(
+                    onClick = { onBackendSelected(CommanderBackend.TERMUX) },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (isTermux) Color(0xFF06281E) else Color(0xFF070B14),
+                    border = BorderStroke(
+                        width = if (isTermux) 1.5.dp else 1.dp,
+                        color = if (isTermux) Color(0xFF10B981) else Color(0xFF1E293B)
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Bolt,
+                                contentDescription = null,
+                                tint = if (isTermux) Color(0xFF10B981) else Color(0xFF64748B),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                "Termux",
+                                color = if (isTermux) Color.White else Color(0xFF94A3B8),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            "Unrestricted • Bionic\nFull adb & pkg access",
+                            color = if (isTermux) Color(0xFF34D399) else Color(0xFF64748B),
+                            fontSize = 10.sp,
+                            lineHeight = 13.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+
+                // Built-in PRoot option
+                val isProot = currentBackend == CommanderBackend.PROOT
+                Surface(
+                    onClick = { onBackendSelected(CommanderBackend.PROOT) },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (isProot) Color(0xFF131B2E) else Color(0xFF070B14),
+                    border = BorderStroke(
+                        width = if (isProot) 1.5.dp else 1.dp,
+                        color = if (isProot) Color(0xFF00F0FF) else Color(0xFF1E293B)
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Shield,
+                                contentDescription = null,
+                                tint = if (isProot) Color(0xFF00F0FF) else Color(0xFF64748B),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                "Built-in PRoot",
+                                color = if (isProot) Color.White else Color(0xFF94A3B8),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            "Sandboxed Debian\nZero setup required",
+                            color = Color(0xFF64748B),
+                            fontSize = 10.sp,
+                            lineHeight = 13.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TermuxAvailabilityBadge(
+    status: TermuxStatus,
+    onClick: () -> Unit
+) {
+    val (fg, bg) = when (status) {
+        TermuxStatus.READY -> Color(0xFF10B981) to Color(0xFF022C1A)
+        TermuxStatus.NEEDS_ALLOW_EXTERNAL_APPS -> Color(0xFFF59E0B) to Color(0xFF2C1E02)
+        TermuxStatus.NEEDS_PERMISSION -> Color(0xFFF97316) to Color(0xFF2E1303)
+        TermuxStatus.INSTALLED -> Color(0xFF38BDF8) to Color(0xFF032236)
+        TermuxStatus.NOT_INSTALLED -> Color(0xFF64748B) to Color(0xFF0E131F)
+    }
+
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(bg)
+            .border(1.dp, fg.copy(alpha = 0.6f), RoundedCornerShape(20.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 9.dp, vertical = 4.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            Box(Modifier.size(6.dp).clip(CircleShape).background(fg))
+            Text(
+                "TERMUX: ${status.label}",
+                color = fg,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+    }
+}
+
+@Composable
+private fun TermuxSetupActionCard(
+    status: TermuxStatus,
+    onCopyScript: () -> Unit,
+    onLaunchTermux: () -> Unit,
+    onRequestPermission: () -> Unit,
+    onInstallTermux: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF091220)),
+        shape = RoundedCornerShape(12.dp),
+        border = CardDefaults.outlinedCardBorder().copy(
+            brush = androidx.compose.ui.graphics.SolidColor(Color(0xFF2563EB).copy(alpha = 0.4f))
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Terminal,
+                        contentDescription = null,
+                        tint = Color(0xFF38BDF8),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        "CONFIGURE TERMUX RUNTIME",
+                        color = Color(0xFF38BDF8),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+
+            Text(
+                text = "Run Desktop Commander in Termux for native bionic execution, real adb, termux-api hardware access, and zero virtualization overhead.",
+                color = Color(0xFF94A3B8),
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                lineHeight = 15.sp
+            )
+
+            // One-liner terminal code box
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF030712))
+                    .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(8.dp))
+                    .padding(10.dp)
+            ) {
+                Text(
+                    text = TermuxBridge.BOOTSTRAP_SCRIPT,
+                    color = Color(0xFF00F0FF),
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    lineHeight = 14.sp
+                )
+            }
+
+            // Action Buttons
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onCopyScript,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(13.dp), tint = Color.White)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Copy Script", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = Color.White)
+                }
+
+                when (status) {
+                    TermuxStatus.NOT_INSTALLED -> {
+                        Button(
+                            onClick = onInstallTermux,
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(Icons.Default.Download, null, modifier = Modifier.size(13.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Get F-Droid", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        }
+                    }
+                    TermuxStatus.NEEDS_PERMISSION -> {
+                        Button(
+                            onClick = onRequestPermission,
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEA580C)),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(Icons.Default.Key, null, modifier = Modifier.size(13.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Grant Perm", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        }
+                    }
+                    else -> {
+                        Button(
+                            onClick = onLaunchTermux,
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(Icons.Default.OpenInNew, null, modifier = Modifier.size(13.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Open Termux", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        }
+                    }
+                }
+            }
+        }
     }
 }

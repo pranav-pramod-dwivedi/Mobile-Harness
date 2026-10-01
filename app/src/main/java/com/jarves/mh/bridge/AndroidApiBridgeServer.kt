@@ -135,11 +135,26 @@ object AndroidApiBridgeServer {
             }
 
             val response: JSONObject = when (path) {
+                // ── Termux execution & status ──────────────────────────────
+                "/termux/status", "/termux/info" -> getTermuxStatus(ctx)
+                "/termux/exec", "/termux/shell" -> {
+                    val cmd = json?.optString("cmd") ?: query["cmd"] ?: ""
+                    val timeout = (if (json != null && json.has("timeout_ms")) json.optLong("timeout_ms", 30_000L) else query["timeout_ms"]?.toLongOrNull() ?: 30_000L).coerceAtLeast(1000L)
+                    if (cmd.isBlank()) {
+                        errorJson("Missing 'cmd' parameter")
+                    } else {
+                        runTermux(ctx, cmd, timeout)
+                    }
+                }
+
                 // ── Core shell execution ────────────────────────────────────
                 "/shell", "/exec" -> {
                     val cmd = json?.optString("cmd") ?: query["cmd"] ?: ""
+                    val env = (json?.optString("env") ?: query["env"] ?: "auto").lowercase()
                     if (cmd.isBlank()) {
                         errorJson("Missing 'cmd' parameter")
+                    } else if (env == "termux" || (env == "auto" && shouldRouteToTermux(ctx, cmd))) {
+                        runTermux(ctx, cmd)
                     } else {
                         runShell(cmd)
                     }
@@ -514,26 +529,71 @@ object AndroidApiBridgeServer {
         return runShell("settings put system $key $value")
     }
 
+    private fun getTermuxStatus(ctx: Context): JSONObject {
+        val installed = com.jarves.mh.termux.TermuxBridge.isInstalled(ctx)
+        val perm = com.jarves.mh.termux.TermuxBridge.hasPermission(ctx)
+        val status = com.jarves.mh.termux.TermuxBridge.checkStatus(ctx)
+        return JSONObject().apply {
+            put("installed", installed)
+            put("permission", perm)
+            put("status", status.name)
+            put("status_label", status.label)
+            put("description", status.description)
+            put("ready", status == com.jarves.mh.termux.TermuxStatus.READY)
+        }
+    }
+
+    private fun shouldRouteToTermux(ctx: Context, cmd: String): Boolean {
+        if (!com.jarves.mh.termux.TermuxBridge.hasPermission(ctx)) return false
+        val trimmed = cmd.trim()
+        return trimmed.startsWith("pkg ") ||
+               trimmed.startsWith("apt ") ||
+               trimmed.startsWith("termux-") ||
+               trimmed.startsWith("tsu") ||
+               trimmed.startsWith("proot-distro")
+    }
+
+    private fun runTermux(ctx: Context, cmd: String, timeoutMs: Long = 30_000L): JSONObject {
+        val res = com.jarves.mh.termux.TermuxBridge.executeSync(ctx, "bridge", cmd, timeoutMs)
+        return if (res != null) {
+            JSONObject().apply {
+                put("stdout", res.stdout ?: "")
+                put("stderr", res.stderr ?: "")
+                put("exit_code", res.exitCode ?: -1)
+                put("err", res.err ?: 0)
+                put("errmsg", res.errmsg ?: "")
+                put("success", res.isSuccess)
+                put("cmd", cmd)
+                put("environment", "termux")
+                if (res.internalError != null) put("internal_error", res.internalError)
+            }
+        } else {
+            errorJson("Termux execution timed out or failed to dispatch")
+        }
+    }
+
     private fun helpJson(): JSONObject {
         val endpoints = JSONArray(listOf(
-            "/shell     POST {cmd}                  — Run any Android shell command",
-            "/battery   GET                         — Battery level, status, temp",
-            "/wifi      GET                         — Network / WiFi info",
-            "/clipboard GET|POST {text}             — Read or write clipboard",
-            "/location  GET                         — GPS location (needs permission)",
-            "/packages  GET                         — List installed apps",
-            "/open      POST {url}                  — Open URL in browser",
-            "/launch    POST {package}              — Launch app by package name",
-            "/notify    POST {title, message}       — Send a notification",
-            "/tap       POST {x, y}                 — Tap screen at coordinates",
-            "/swipe     POST {x1,y1,x2,y2,duration} — Swipe gesture",
-            "/type      POST {text}                 — Type text via input",
-            "/key       POST {key}                  — Key event (back/home/power/etc)",
-            "/screen    GET                         — Screen resolution & density",
-            "/device    GET                         — Device model, Android version",
-            "/contacts  GET                         — Contact list (needs permission)",
-            "/capture   GET                         — CLI text wireframe of current screen",
-            "/settings  GET|POST {key[, value]}     — Android Settings read/write"
+            "/shell         POST {cmd[, env]}           — Run Android shell or Termux command",
+            "/termux/exec   POST {cmd[, timeout_ms]}    — Run command in Termux (unrestricted)",
+            "/termux/status GET                         — Termux installation & permission status",
+            "/battery       GET                         — Battery level, status, temp",
+            "/wifi          GET                         — Network / WiFi info",
+            "/clipboard     GET|POST {text}             — Read or write clipboard",
+            "/location      GET                         — GPS location (needs permission)",
+            "/packages      GET                         — List installed apps",
+            "/open          POST {url}                  — Open URL in browser",
+            "/launch        POST {package}              — Launch app by package name",
+            "/notify        POST {title, message}       — Send a notification",
+            "/tap           POST {x, y}                 — Tap screen at coordinates",
+            "/swipe         POST {x1,y1,x2,y2,duration} — Swipe gesture",
+            "/type          POST {text}                 — Type text via input",
+            "/key           POST {key}                  — Key event (back/home/power/etc)",
+            "/screen        GET                         — Screen resolution & density",
+            "/device        GET                         — Device model, Android version",
+            "/contacts      GET                         — Contact list (needs permission)",
+            "/capture       GET                         — CLI text wireframe of current screen",
+            "/settings      GET|POST {key[, value]}     — Android Settings read/write"
         ))
         return JSONObject().apply {
             put("name", "Android API Bridge")
